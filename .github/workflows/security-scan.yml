@@ -2,7 +2,7 @@ name: API Security Scan (self-hosted)
 
 # Runs on a SELF-HOSTED runner on the machine where VAMPI is running, and scans
 # the live local container at http://localhost:5002 (no fresh instance is built).
-#   - BASELINE : OWASP ZAP api-scan
+#   - BASELINE : OWASP ZAP, tuned (authenticated JWT + HIGH attack strength)
 #   - FRAMEWORK: GenAI DAST framework, pulled as a GHCR image
 #   - SCORING  : recall / precision / F1 vs the VAMPI ground truth
 #
@@ -48,8 +48,8 @@ jobs:
           done
           curl -sf --max-time 15 "$TARGET/createdb" && echo " db seeded"
 
-      # ---------- BASELINE: OWASP ZAP ----------
-      - name: OWASP ZAP baseline scan
+      # ---------- BASELINE: OWASP ZAP (tuned, authenticated) ----------
+      - name: OWASP ZAP tuned scan
         run: |
           chmod +x .framework/benchmarks/zap/run-zap-scan.sh
           .framework/benchmarks/zap/run-zap-scan.sh \
