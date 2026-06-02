@@ -1,17 +1,15 @@
-name: API Security Scan
+name: API Security Scan (self-hosted)
 
-# Thesis demo: a developer commits to the VAMPI project and GitHub Actions runs
-# DAST against the running API, comparing two tools:
+# Runs on a SELF-HOSTED runner on the machine where VAMPI is running, and scans
+# the live local container at http://localhost:5002 (no fresh instance is built).
 #   - BASELINE : OWASP ZAP api-scan
-#   - FRAMEWORK: GenAI DAST framework (GHCR image, gated on the OPENAI_API_KEY secret)
-#   - SCORING  : recall / precision / F1 vs the VAMPI ground truth (both modes)
+#   - FRAMEWORK: GenAI DAST framework, pulled as a GHCR image
+#   - SCORING  : recall / precision / F1 vs the VAMPI ground truth
 #
-# Harness, ground truth and scoring live in the companion `thesis-framework`
-# repo (the product), checked out here at .framework.
+# Trigger with a push, or on demand:  gh workflow run security-scan.yml -R cheetooh/thesis-target
 
 on:
   push:
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -21,10 +19,11 @@ permissions:
 env:
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
   FRAMEWORK_IMAGE: ghcr.io/${{ github.repository_owner }}/thesis-framework:latest
+  TARGET: http://localhost:5002
 
 jobs:
   api-security-scan:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, docker]
     steps:
       - name: Checkout target (VAMPI)
         uses: actions/checkout@v4
@@ -36,90 +35,72 @@ jobs:
           path: .framework
           token: ${{ secrets.FRAMEWORK_TOKEN || github.token }}
 
-      - name: Build & start VAMPI (vulnerable :5002, secure :5001)
+      - name: Verify the local VAMPI container is reachable
         run: |
-          docker compose up -d --build
-          for port in 5001 5002; do
-            echo "waiting for VAMPI on :$port ..."
-            for i in $(seq 1 40); do
-              curl -sf "http://localhost:$port/" >/dev/null && break
-              sleep 1
-            done
-            curl -sf "http://localhost:$port/createdb" && echo " db seeded on :$port"
+          echo "Scanning the live container at $TARGET"
+          for i in $(seq 1 20); do
+            curl -sf "$TARGET/" >/dev/null && break
+            echo "waiting for VAMPI ..."; sleep 2
           done
+          curl -sf "$TARGET/createdb" && echo " db seeded"
 
       # ---------- BASELINE: OWASP ZAP ----------
-      - name: OWASP ZAP baseline scan (vulnerable + secure)
+      - name: OWASP ZAP baseline scan
         run: |
           chmod +x .framework/benchmarks/zap/run-zap-scan.sh
           .framework/benchmarks/zap/run-zap-scan.sh \
-            vampi-vuln   http://localhost:5002/openapi.json host http://localhost:5002
-          .framework/benchmarks/zap/run-zap-scan.sh \
-            vampi-secure http://localhost:5001/openapi.json host http://localhost:5001
+            vampi-local "$TARGET/openapi.json" host "$TARGET"
 
       - name: Score ZAP
         run: |
           python3 .framework/scoring/score.py --tool zap --mode vulnerable \
-            .framework/results/zap/vampi-vuln-latest/report.json --json > zap-vuln.json
-          python3 .framework/scoring/score.py --tool zap --mode secure \
-            .framework/results/zap/vampi-secure-latest/report.json --json > zap-secure.json
-          cat zap-vuln.json zap-secure.json
+            .framework/results/zap/vampi-local-latest/report.json --json > zap-vuln.json
+          cat zap-vuln.json
 
-      # ---------- FRAMEWORK: GenAI DAST (gated on the OpenAI key) ----------
-      # Build the framework image from the checked-out thesis-framework repo.
-      # (If/when the image is published to GHCR, swap this for a docker pull of
-      #  $FRAMEWORK_IMAGE.)
-      - name: Build GenAI framework image
-        if: ${{ env.OPENAI_API_KEY != '' }}
-        run: docker build -t genai-dast:ci .framework/framework
-
-      - name: GenAI framework scan (vulnerable + secure)
+      # ---------- FRAMEWORK: GenAI DAST (GHCR image) ----------
+      - name: Pull GenAI framework image
         if: ${{ env.OPENAI_API_KEY != '' }}
         run: |
-          mkdir -p fw-out/vuln fw-out/secure
+          # Pull the published image; fall back to the locally-cached image if the
+          # registry copy is private/unavailable on this host.
+          docker pull "$FRAMEWORK_IMAGE" || echo "registry pull failed; using local image cache"
+
+      - name: GenAI framework scan
+        if: ${{ env.OPENAI_API_KEY != '' }}
+        run: |
+          mkdir -p fw-out
           docker run --rm --network host -e OPENAI_API_KEY \
-            -v "$PWD/fw-out/vuln":/work genai-dast:ci \
-            --target http://localhost:5002 --mode vulnerable --out /work
-          docker run --rm --network host -e OPENAI_API_KEY \
-            -v "$PWD/fw-out/secure":/work genai-dast:ci \
-            --target http://localhost:5001 --mode secure --out /work
+            -v "$PWD/fw-out":/work "$FRAMEWORK_IMAGE" \
+            --target "$TARGET" --mode vulnerable --out /work
 
       - name: Score framework
         if: ${{ env.OPENAI_API_KEY != '' }}
         run: |
           python3 .framework/scoring/score.py --tool framework --mode vulnerable \
-            fw-out/vuln/findings.json --json > fw-vuln.json
-          python3 .framework/scoring/score.py --tool framework --mode secure \
-            fw-out/secure/findings.json --json > fw-secure.json
-          cat fw-vuln.json fw-secure.json
+            fw-out/findings.json --json > fw-vuln.json
+          cat fw-vuln.json
 
       # ---------- Report ----------
       - name: Publish comparison to job summary
         if: always()
         run: |
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json, os
+          import json
           def load(p):
               try: return json.load(open(p))
               except Exception: return None
-          rows = {
-              "ZAP (vulnerable)":       load("zap-vuln.json"),
-              "ZAP (secure)":           load("zap-secure.json"),
-              "Framework (vulnerable)": load("fw-vuln.json"),
-              "Framework (secure)":     load("fw-secure.json"),
-          }
-          print("## API Security Scan — GenAI framework vs OWASP ZAP\n")
-          print("| Tool / mode | Instances | TP | FN | FP | Recall | Precision | F1 |")
-          print("|-------------|-----------|----|----|----|--------|-----------|----|")
+          rows = {"OWASP ZAP": load("zap-vuln.json"), "GenAI framework": load("fw-vuln.json")}
+          print("## API Security Scan — live local VAMPI (self-hosted runner)\n")
+          print("| Tool | Instances | TP | FN | FP | Recall | Precision | F1 |")
+          print("|------|-----------|----|----|----|--------|-----------|----|")
           for label, r in rows.items():
               if r:
                   print(f"| {label} | {r['present_instances']} | {r['TP']} | {r['FN']} | "
                         f"{r['FP']} | {r['recall']} | {r['precision']} | {r['f1']} |")
               else:
                   print(f"| {label} | _not run_ |  |  |  |  |  |  |")
-          fw = rows["Framework (vulnerable)"]
-          if not fw:
-              print("\n> GenAI framework step skipped — set the `OPENAI_API_KEY` repo secret to enable it.")
+          if not rows["GenAI framework"]:
+              print("\n> GenAI framework skipped — set the `OPENAI_API_KEY` repo secret to enable it.")
           PY
 
       - name: Upload scan artifacts
@@ -128,8 +109,8 @@ jobs:
         with:
           name: security-scan-results
           path: |
-            zap-*.json
-            fw-*.json
+            zap-vuln.json
+            fw-vuln.json
             fw-out/**
             .framework/results/zap/
           retention-days: 30
