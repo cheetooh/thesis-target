@@ -35,14 +35,18 @@ jobs:
           path: .framework
           token: ${{ secrets.FRAMEWORK_TOKEN || github.token }}
 
-      - name: Verify the local VAMPI container is reachable
+      - name: Heal & verify the local VAMPI container
         run: |
           echo "Scanning the live container at $TARGET"
-          for i in $(seq 1 20); do
-            curl -sf "$TARGET/" >/dev/null && break
+          # Restart the target first: VAMPI is a single-threaded dev server and the
+          # framework's ReDoS test can leave a previous run's worker wedged. A
+          # restart guarantees a clean, responsive server for this scan.
+          docker restart vampi-vulnerable >/dev/null 2>&1 || true
+          for i in $(seq 1 30); do
+            curl -sf --max-time 10 "$TARGET/" >/dev/null && break
             echo "waiting for VAMPI ..."; sleep 2
           done
-          curl -sf "$TARGET/createdb" && echo " db seeded"
+          curl -sf --max-time 15 "$TARGET/createdb" && echo " db seeded"
 
       # ---------- BASELINE: OWASP ZAP ----------
       - name: OWASP ZAP baseline scan
