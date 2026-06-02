@@ -58,12 +58,16 @@ jobs:
 
       - name: Score ZAP against ground truth
         run: |
+          # Redirect (not tee) so a scoring failure fails the step instead of
+          # being masked by the pipe's exit code.
           python3 .framework/scoring/score.py --tool zap --mode vulnerable \
             .framework/results/zap/vampi-vuln-latest/report.json --json \
-            | tee .framework/results/zap/score-vuln.json
+            > .framework/results/zap/score-vuln.json
+          cat .framework/results/zap/score-vuln.json
           python3 .framework/scoring/score.py --tool zap --mode secure \
             .framework/results/zap/vampi-secure-latest/report.json --json \
-            | tee .framework/results/zap/score-secure.json
+            > .framework/results/zap/score-secure.json
+          cat .framework/results/zap/score-secure.json
 
       - name: Publish metrics to job summary
         if: always()
