@@ -7,3 +7,12 @@ services:
   environment:
    - vulnerable=1
    - tokentimetolive=3600
+  # Hard CPU ceiling: a runaway dev-server thread (half-closed-socket busy loop)
+  # can pin at most 1 core instead of starving the host.
+  cpus: 1.0
+  restart: unless-stopped
+  healthcheck:
+   test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/',timeout=3).status==200 else 1)"]
+   interval: 30s
+   timeout: 5s
+   retries: 3

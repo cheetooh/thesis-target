@@ -69,6 +69,15 @@ jobs:
           # registry copy is private/unavailable on this host.
           docker pull "$FRAMEWORK_IMAGE" || echo "registry pull failed; using local image cache"
 
+      - name: Reset target before framework scan
+        if: ${{ env.OPENAI_API_KEY != '' }}
+        run: |
+          # Give the GenAI run a clean, responsive target — the ZAP scan above may
+          # have left the dev server in a degraded state, and this keeps the
+          # framework's recorded scan duration a fair measurement.
+          chmod +x .framework/benchmarks/reset-target.sh
+          HEALTH_URL="$TARGET/" .framework/benchmarks/reset-target.sh
+
       - name: GenAI framework scan
         if: ${{ env.OPENAI_API_KEY != '' }}
         run: |
